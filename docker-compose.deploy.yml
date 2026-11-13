@@ -1,10 +1,13 @@
+
 services:
   backend:
-    image: ${LOCAL_REGISTRY}/momo-store-backend:latest
-    container_name: momo-store-backend
+    image: ${NEXUS_HOST}/timerbulatov-backend-docker/sandbox-backend:${VERSION}
+    container_name: sandbox-backend
     restart: unless-stopped
     expose:
       - "8081"
+    env_file:
+      - ./backend/.env
     healthcheck:
       test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:8081/health"]
       interval: 10s
@@ -12,8 +15,8 @@ services:
       retries: 5
 
   frontend:
-    image: ${LOCAL_REGISTRY}/momo-store-frontend:latest
-    container_name: momo-store-frontend
+    image: ${NEXUS_HOST}/timerbulatov-frontend-docker/sandbox-frontend:${VERSION}
+    container_name: sandbox-frontend
     restart: unless-stopped
     depends_on:
       backend:
