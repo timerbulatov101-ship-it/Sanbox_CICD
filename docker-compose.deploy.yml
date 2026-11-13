@@ -1,0 +1,22 @@
+services:
+  backend:
+    image: ${LOCAL_REGISTRY}/momo-store-backend:latest
+    container_name: momo-store-backend
+    restart: unless-stopped
+    expose:
+      - "8081"
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:8081/health"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+
+  frontend:
+    image: ${LOCAL_REGISTRY}/momo-store-frontend:latest
+    container_name: momo-store-frontend
+    restart: unless-stopped
+    depends_on:
+      backend:
+        condition: service_healthy
+    ports:
+      - "${APP_PORT:-8080}:8080"
