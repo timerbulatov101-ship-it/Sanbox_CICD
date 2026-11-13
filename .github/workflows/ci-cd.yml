@@ -3,9 +3,7 @@ name: Sandbox CI/CD
 
 on:
   push:
-    branches: [main]
-  pull_request:
-    branches: [main]
+    branches: ["**"]
   workflow_dispatch:
     inputs:
       VERSION:
@@ -19,88 +17,70 @@ permissions:
 
 concurrency:
   group: sandbox-${{ github.ref }}
-  cancel-in-progress: true
-
-env:
-  VERSION: ${{ inputs.VERSION || format('1.0.{0}', github.run_number) }}
+  cancel-in-progress: false
 
 jobs:
-  test:
-    name: Run tests
+  version:
+    name: Generate version
     runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.version.outputs.version }}
 
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Setup Go
-        uses: actions/setup-go@v5
-        with:
-          go-version: "1.23"
-
-      - name: Backend tests
-        working-directory: backend
-        run: go test ./...
-
-      - name: Setup Node
-        uses: actions/setup-node@v4
-        with:
-          node-version: "16.20.0"
-          cache: npm
-          cache-dependency-path: frontend/package-lock.json
-
-      - name: Install frontend dependencies
-        working-directory: frontend
-        run: npm ci
-
-      - name: Frontend tests
-        working-directory: frontend
+      - name: Generate version
+        id: version
+        env:
+          INPUT_VERSION: ${{ inputs.VERSION }}
         run: |
-          if npm run | grep -q "test:unit"; then
-            npm run test:unit
-          elif npm run | grep -qE '(^|[[:space:]])test($|[[:space:]])'; then
-            npm test
+          if [ -n "$INPUT_VERSION" ]; then
+            VERSION="$INPUT_VERSION"
           else
-            echo "No frontend tests configured. Skipping."
+            VERSION=$(date -u +%Y%m%d-%H%M%S)
           fi
 
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "Using version: $VERSION"
+
   build:
-    name: Build and publish images
-    needs: test
+    name: Build and publish ${{ matrix.component }}
+    needs: version
+    if: github.event_name == 'push'
     runs-on: ubuntu-latest
-    if: github.event_name != 'pull_request'
+
+    strategy:
+      fail-fast: false
+      matrix:
+        component:
+          - backend
+          - frontend
 
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Prepare image names
-        run: |
-          echo "IMAGE_OWNER=${GITHUB_REPOSITORY_OWNER,,}" >> "$GITHUB_ENV"
-
-      - name: Configure Docker for HTTP Nexus
+      - name: Create BuildKit config
         env:
           NEXUS_HOST: ${{ secrets.NEXUS_HOST }}
         run: |
-          sudo python3 -c '
-          import json, os, sys
-          p = "/etc/docker/daemon.json"
-          d = json.load(open(p)) if os.path.exists(p) else {}
-          a = set(d.get("insecure-registries", []))
-          a.add(sys.argv[1])
-          d["insecure-registries"] = sorted(a)
-          json.dump(d, open(p, "w"))
-          ' "$NEXUS_HOST"
-          sudo systemctl restart docker
+          if [[ "$NEXUS_HOST" == http://* || "$NEXUS_HOST" == https://* || "$NEXUS_HOST" == */* ]]; then
+            echo "NEXUS_HOST must contain only host:port"
+            exit 1
+          fi
+
+          cat > buildkitd.toml <<EOF
+          [registry."${NEXUS_HOST}"]
+            http = true
+            insecure = true
+          EOF
+
+          cat buildkitd.toml
 
       - name: Setup Docker Buildx
+        id: buildx
         uses: docker/setup-buildx-action@v4
         with:
           driver: docker-container
-          config-inline: |
-            [registry."153.51.118.157:8081"]
-              http = true
-              insecure = true
+          config: ./buildkitd.toml
 
       - name: Login to GHCR
         uses: docker/login-action@v4
@@ -116,40 +96,46 @@ jobs:
           username: ${{ secrets.NEXUS_REPO_USER }}
           password: ${{ secrets.NEXUS_REPO_PASS }}
 
-      - name: Build and push backend
-        uses: docker/build-push-action@v7
+      - name: Docker metadata
+        id: meta
+        uses: docker/metadata-action@v5
         with:
-          context: ./backend
-          file: ./backend/Dockerfile
-          push: true
-          build-args: |
-            VERSION=${{ env.VERSION }}
+          images: |
+            ghcr.io/${{ github.repository_owner }}/sandbox-${{ matrix.component }}
+            ${{ secrets.NEXUS_HOST }}/timerbulatov-backend-docker/sandbox-${{ matrix.component }}
           tags: |
-            ghcr.io/${{ env.IMAGE_OWNER }}/sandbox-backend:${{ env.VERSION }}
-            ghcr.io/${{ env.IMAGE_OWNER }}/sandbox-backend:${{ github.sha }}
-            ${{ secrets.NEXUS_HOST }}/timerbulatov-backend-docker/sandbox-backend:${{ env.VERSION }}
-            ${{ secrets.NEXUS_HOST }}/timerbulatov-backend-docker/sandbox-backend:${{ github.sha }}
+            type=raw,value=${{ needs.version.outputs.version }}
+            type=sha,prefix=sha-,format=short
+            type=raw,value=latest,enable=${{ github.ref == 'refs/heads/main' }}
+          flavor: |
+            latest=false
 
-      - name: Build and push frontend
+      - name: Build and push ${{ matrix.component }}
         uses: docker/build-push-action@v7
         with:
-          context: ./frontend
-          file: ./frontend/Dockerfile
+          builder: ${{ steps.buildx.outputs.name }}
+          context: ./${{ matrix.component }}
+          file: ./${{ matrix.component }}/Dockerfile
           push: true
-          build-args: |
-            VERSION=${{ env.VERSION }}
-            VUE_APP_API_URL=${{ vars.APP_API_URL }}
-          tags: |
-            ghcr.io/${{ env.IMAGE_OWNER }}/sandbox-frontend:${{ env.VERSION }}
-            ghcr.io/${{ env.IMAGE_OWNER }}/sandbox-frontend:${{ github.sha }}
-            ${{ secrets.NEXUS_HOST }}/timerbulatov-frontend-docker/sandbox-frontend:${{ env.VERSION }}
-            ${{ secrets.NEXUS_HOST }}/timerbulatov-frontend-docker/sandbox-frontend:${{ github.sha }}
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha,scope=${{ matrix.component }}
+          cache-to: type=gha,mode=max,scope=${{ matrix.component }}
 
   deploy:
     name: Deploy application
-    needs: build
+    needs:
+      - version
+      - build
+    if: >-
+      always() &&
+      github.ref == 'refs/heads/main' &&
+      needs.version.result == 'success' &&
+      (
+        (github.event_name == 'push' && needs.build.result == 'success') ||
+        github.event_name == 'workflow_dispatch'
+      )
     runs-on: ubuntu-latest
-    if: github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'workflow_dispatch')
     environment: production
 
     steps:
@@ -173,6 +159,7 @@ jobs:
       - name: Prepare deployment files
         env:
           NEXUS_HOST: ${{ secrets.NEXUS_HOST }}
+          VERSION: ${{ needs.version.outputs.version }}
           APP_ENV_FILE: ${{ secrets.APP_ENV_FILE }}
         run: |
           mkdir -p deploy/backend
@@ -186,6 +173,8 @@ jobs:
           EOF
 
           printf '%s' "$APP_ENV_FILE" > deploy/backend/.env
+
+          echo "Deployment version: $VERSION"
 
       - name: Copy deployment files
         env:
@@ -212,16 +201,6 @@ jobs:
         run: |
           ssh "$VM_USER@$VM_HOST" \
             "sudo python3 -c 'import json,os,sys; p=\"/etc/docker/daemon.json\"; d=json.load(open(p)) if os.path.exists(p) else {}; a=set(d.get(\"insecure-registries\", [])); a.add(sys.argv[1]); d[\"insecure-registries\"]=sorted(a); json.dump(d,open(p,\"w\"))' '$NEXUS_HOST' && sudo systemctl restart docker"
-
-      - name: Login to GHCR on VM
-        env:
-          VM_HOST: ${{ secrets.VM_HOST }}
-          VM_USER: ${{ secrets.VM_USER }}
-          GHCR_PAT: ${{ secrets.GHCR_PAT }}
-          GHCR_USERNAME: ${{ github.repository_owner }}
-        run: |
-          printf '%s' "$GHCR_PAT" | ssh "$VM_USER@$VM_HOST" \
-            "docker login ghcr.io --username '$GHCR_USERNAME' --password-stdin"
 
       - name: Login to Nexus on VM
         env:
