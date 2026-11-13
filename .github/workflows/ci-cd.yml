@@ -96,8 +96,9 @@ jobs:
       - name: Setup Docker Buildx
         uses: docker/setup-buildx-action@v4
         with:
+          driver: docker-container
           config-inline: |
-            [registry."${{ secrets.NEXUS_HOST }}"]
+            [registry."153.51.118.157:8081"]
               http = true
               insecure = true
 
