@@ -1,7 +1,7 @@
 
 services:
   backend:
-    image: ${NEXUS_HOST}/timerbulatov-backend-docker/sandbox-backend:${VERSION}
+    image: ${REPOSITORY_BACKEND}:${VERSION}
     container_name: sandbox-backend
     restart: unless-stopped
     expose:
@@ -15,7 +15,7 @@ services:
       retries: 5
 
   frontend:
-    image: ${NEXUS_HOST}/timerbulatov-frontend-docker/sandbox-frontend:${VERSION}
+    image: ${REPOSITORY_FRONTEND}:${VERSION}
     container_name: sandbox-frontend
     restart: unless-stopped
     depends_on:
@@ -23,3 +23,4 @@ services:
         condition: service_healthy
     ports:
       - "${APP_PORT:-8080}:8080"
+

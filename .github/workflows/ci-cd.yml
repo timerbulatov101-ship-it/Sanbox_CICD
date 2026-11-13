@@ -7,6 +7,11 @@ on:
   pull_request:
     branches: [main]
   workflow_dispatch:
+    inputs:
+      VERSION:
+        description: "Версия образов для повторного деплоя или отката"
+        required: true
+        type: string
 
 permissions:
   contents: read
@@ -17,7 +22,7 @@ concurrency:
   cancel-in-progress: true
 
 env:
-  VERSION: "1.0.${{ github.run_number }}"
+  VERSION: ${{ inputs.VERSION || format('1.0.{0}', github.run_number) }}
 
 jobs:
   test:
@@ -173,6 +178,8 @@ jobs:
 
           cat > deploy/.env <<EOF
           NEXUS_HOST=${NEXUS_HOST}
+          REPOSITORY_BACKEND=${NEXUS_HOST}/timerbulatov-backend-docker/sandbox-backend
+          REPOSITORY_FRONTEND=${NEXUS_HOST}/timerbulatov-frontend-docker/sandbox-frontend
           VERSION=${VERSION}
           APP_PORT=8080
           EOF
