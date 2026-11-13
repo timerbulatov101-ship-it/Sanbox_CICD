@@ -1,3 +1,4 @@
+
 name: Sandbox CI/CD
 
 on:
@@ -50,14 +51,12 @@ jobs:
       - name: Frontend tests
         working-directory: frontend
         run: |
-          if node -e "const s=require('./package.json').scripts || {}; process.exit(s['test:unit'] || s.test ? 0 : 1)"; then
-            if node -e "const s=require('./package.json').scripts || {}; process.exit(s['test:unit'] ? 0 : 1)"; then
-              npm run test:unit
-            else
-              npm test -- --runInBand
-            fi
+          if npm run | grep -q "test:unit"; then
+            npm run test:unit
+          elif npm run | grep -qE '(^|[[:space:]])test($|[[:space:]])'; then
+            npm test
           else
-            echo "No frontend test script configured. Skipping."
+            echo "No frontend tests configured. Skipping."
           fi
 
   build:
@@ -70,12 +69,32 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Prepare image owner
+      - name: Prepare image names
         run: |
           echo "IMAGE_OWNER=${GITHUB_REPOSITORY_OWNER,,}" >> "$GITHUB_ENV"
 
+      - name: Configure Docker for HTTP Nexus
+        env:
+          NEXUS_HOST: ${{ secrets.NEXUS_HOST }}
+        run: |
+          sudo python3 -c '
+          import json, os, sys
+          p = "/etc/docker/daemon.json"
+          d = json.load(open(p)) if os.path.exists(p) else {}
+          a = set(d.get("insecure-registries", []))
+          a.add(sys.argv[1])
+          d["insecure-registries"] = sorted(a)
+          json.dump(d, open(p, "w"))
+          ' "$NEXUS_HOST"
+          sudo systemctl restart docker
+
       - name: Setup Docker Buildx
         uses: docker/setup-buildx-action@v4
+        with:
+          config-inline: |
+            [registry."${{ secrets.NEXUS_HOST }}"]
+              http = true
+              insecure = true
 
       - name: Login to GHCR
         uses: docker/login-action@v4
@@ -102,8 +121,8 @@ jobs:
           tags: |
             ghcr.io/${{ env.IMAGE_OWNER }}/sandbox-backend:${{ env.VERSION }}
             ghcr.io/${{ env.IMAGE_OWNER }}/sandbox-backend:${{ github.sha }}
-            ${{ secrets.NEXUS_HOST }}/sandbox-backend:${{ env.VERSION }}
-            ${{ secrets.NEXUS_HOST }}/sandbox-backend:${{ github.sha }}
+            ${{ secrets.NEXUS_HOST }}/timerbulatov-backend-docker/sandbox-backend:${{ env.VERSION }}
+            ${{ secrets.NEXUS_HOST }}/timerbulatov-backend-docker/sandbox-backend:${{ github.sha }}
 
       - name: Build and push frontend
         uses: docker/build-push-action@v7
@@ -117,15 +136,14 @@ jobs:
           tags: |
             ghcr.io/${{ env.IMAGE_OWNER }}/sandbox-frontend:${{ env.VERSION }}
             ghcr.io/${{ env.IMAGE_OWNER }}/sandbox-frontend:${{ github.sha }}
-            ${{ secrets.NEXUS_HOST }}/sandbox-frontend:${{ env.VERSION }}
-            ${{ secrets.NEXUS_HOST }}/sandbox-frontend:${{ github.sha }}
+            ${{ secrets.NEXUS_HOST }}/timerbulatov-frontend-docker/sandbox-frontend:${{ env.VERSION }}
+            ${{ secrets.NEXUS_HOST }}/timerbulatov-frontend-docker/sandbox-frontend:${{ github.sha }}
 
   deploy:
     name: Deploy application
     needs: build
     runs-on: ubuntu-latest
-    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
-
+    if: github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'workflow_dispatch')
     environment: production
 
     steps:
@@ -161,7 +179,7 @@ jobs:
 
           printf '%s' "$APP_ENV_FILE" > deploy/backend/.env
 
-      - name: Copy files to server
+      - name: Copy deployment files
         env:
           VM_HOST: ${{ secrets.VM_HOST }}
           VM_USER: ${{ secrets.VM_USER }}
@@ -178,7 +196,16 @@ jobs:
           scp deploy/backend/.env \
             "$VM_USER@$VM_HOST:$DEPLOY_PATH/backend/.env"
 
-      - name: Login to GHCR on remote server
+      - name: Configure HTTP Nexus on VM
+        env:
+          VM_HOST: ${{ secrets.VM_HOST }}
+          VM_USER: ${{ secrets.VM_USER }}
+          NEXUS_HOST: ${{ secrets.NEXUS_HOST }}
+        run: |
+          ssh "$VM_USER@$VM_HOST" \
+            "sudo python3 -c 'import json,os,sys; p=\"/etc/docker/daemon.json\"; d=json.load(open(p)) if os.path.exists(p) else {}; a=set(d.get(\"insecure-registries\", [])); a.add(sys.argv[1]); d[\"insecure-registries\"]=sorted(a); json.dump(d,open(p,\"w\"))' '$NEXUS_HOST' && sudo systemctl restart docker"
+
+      - name: Login to GHCR on VM
         env:
           VM_HOST: ${{ secrets.VM_HOST }}
           VM_USER: ${{ secrets.VM_USER }}
@@ -186,10 +213,9 @@ jobs:
           GHCR_USERNAME: ${{ github.repository_owner }}
         run: |
           printf '%s' "$GHCR_PAT" | ssh "$VM_USER@$VM_HOST" \
-            "docker login ghcr.io \
-            --username '$GHCR_USERNAME' --password-stdin"
+            "docker login ghcr.io --username '$GHCR_USERNAME' --password-stdin"
 
-      - name: Login to Nexus on remote server
+      - name: Login to Nexus on VM
         env:
           VM_HOST: ${{ secrets.VM_HOST }}
           VM_USER: ${{ secrets.VM_USER }}
@@ -198,8 +224,7 @@ jobs:
           NEXUS_REPO_PASS: ${{ secrets.NEXUS_REPO_PASS }}
         run: |
           printf '%s' "$NEXUS_REPO_PASS" | ssh "$VM_USER@$VM_HOST" \
-            "docker login '$NEXUS_HOST' \
-            --username '$NEXUS_REPO_USER' --password-stdin"
+            "docker login '$NEXUS_HOST' --username '$NEXUS_REPO_USER' --password-stdin"
 
       - name: Deploy with Docker Compose
         env:
