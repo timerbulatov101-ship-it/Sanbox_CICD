@@ -91,3 +91,39 @@ For open source projects, say how it is licensed.
 
 ## Project status
 If you have run out of energy or time for your project, put a note at the top of the README saying that development has slowed down or stopped completely. Someone may choose to fork your project or volunteer to step in as a maintainer or owner, allowing your project to keep going. You can also make an explicit request for maintainers.
+
+## Go tests and static complexity analysis
+
+Backend tests are located in `backend/`. The CI pipeline builds the Go builder image,
+runs `go test`, publishes JUnit and coverage reports, and runs the custom
+cyclomatic-complexity analyzer.
+
+Run the checks locally:
+
+```bash
+cd backend
+go test ./...
+go run ./cmd/complexity -path . -max 15
+```
+
+The analyzer uses Go's standard `go/ast` package. Each function starts with complexity 1
+and adds one for every `if`, `for`, `range`, non-default `switch` case, non-default
+`select` case, `&&`, and `||`. It exits with code 1 if a function exceeds the threshold.
+Use `-max` to change the threshold and `-path` to select a directory.
+
+## Container registries: GHCR and Nexus
+
+The CI pipeline publishes each backend/frontend image to both GitHub Container Registry
+(GHCR) and the private Nexus Docker hosted repositories. Deployment pulls images from Nexus.
+
+Required GitHub Actions secrets:
+
+- `NEXUS_HOST` — Nexus host and port only, without `http://` or a path (for example `51.250.81.62:8081`).
+- `NEXUS_REPO_USER` — Nexus Docker repository account.
+- `NEXUS_REPO_PASS` — Nexus Docker repository password/token.
+- `VM_HOST`, `VM_USER`, `VM_SSH_KEY`, `VM_SSH_KNOWN_HOSTS`, `DEPLOY_PATH`, `APP_ENV_FILE` — deployment connection and application configuration.
+
+The Nexus Docker hosted repositories expected by this workflow are
+`timerbulatov-backend-docker` and `timerbulatov-frontend-docker`.
+The Nexus endpoint in this project uses HTTP, so BuildKit and the Docker daemon on the
+deployment VM are configured to trust it as an insecure registry.
