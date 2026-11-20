@@ -305,14 +305,50 @@ jobs:
           scp deploy/backend/.env \
             "$VM_USER@$VM_HOST:$DEPLOY_PATH/backend/.env"
 
+      
       - name: Configure HTTP Nexus on VM
         env:
           VM_HOST: ${{ secrets.VM_HOST }}
           VM_USER: ${{ secrets.VM_USER }}
           NEXUS_HOST: ${{ secrets.NEXUS_HOST }}
         run: |
+          set -e
+
           ssh "$VM_USER@$VM_HOST" \
-            "sudo python3 -c 'import json,os,sys; p=\"/etc/docker/daemon.json\"; d=json.load(open(p)) if os.path.exists(p) else {}; a=set(d.get(\"insecure-registries\", [])); a.add(sys.argv[1]); d[\"insecure-registries\"]=sorted(a); json.dump(d,open(p,\"w\"))' '$NEXUS_HOST' && sudo systemctl restart docker"
+            "sudo mkdir -p /etc/docker"
+
+          ssh "$VM_USER@$VM_HOST" \
+            "sudo python3 - '$NEXUS_HOST' <<'PY'
+          import json
+          import os
+          import sys
+
+          path = '/etc/docker/daemon.json'
+          nexus_host = sys.argv[1]
+
+          if os.path.exists(path):
+              with open(path, 'r') as f:
+                  config = json.load(f)
+          else:
+              config = {}
+
+          registries = set(config.get('insecure-registries', []))
+          registries.add(nexus_host)
+
+          config['insecure-registries'] = sorted(registries)
+
+          temp_path = path + '.tmp'
+
+          with open(temp_path, 'w') as f:
+              json.dump(config, f, indent=2)
+
+          os.replace(temp_path, path)
+          PY
+          sudo systemctl restart docker"
+
+          ssh "$VM_USER@$VM_HOST" \
+            "sudo docker info"
+
 
       - name: Login to Nexus on VM
         env:
