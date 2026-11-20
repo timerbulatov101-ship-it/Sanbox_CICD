@@ -7,7 +7,7 @@ on:
   workflow_dispatch:
     inputs:
       VERSION:
-        description: "Версия образов для повторного деплоя или отката"
+        description: "Версия образов"
         required: true
         type: string
 
@@ -28,6 +28,8 @@ jobs:
         env:
           INPUT_VERSION: ${{ inputs.VERSION }}
         run: |
+          set -e
+
           if [ -n "$INPUT_VERSION" ]; then
             VERSION="$INPUT_VERSION"
           else
@@ -39,107 +41,154 @@ jobs:
             exit 1
           fi
 
-          NEXUS_REPO_USER: ${{ secrets.NEXUS_REPO_USER }}
-          NEXUS_REPO_PASS: ${{ secrets.NEXUS_REPO_PASS }}
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "Using version: $VERSION"
+
+  test:
+    name: Backend tests
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Build backend builder
+        run: |
+          docker build \
+            --target builder \
+            -t sandbox-backend-builder:ci \
+            ./backend
+
+      - name: Run tests
         run: |
           set -e
+          mkdir -p reports
 
-          test -n "$NEXUS_HOST" || {
-            echo "NEXUS_HOST is missing"
-            exit 1
-          }
+          docker run --rm \
+            -v "$PWD/reports:/reports" \
+            sandbox-backend-builder:ci \
+            sh -c '
+              go install github.com/jstemmer/go-junit-report/v2@v2.1.0
 
-          test -n "$NEXUS_REPO_USER" || {
-            echo "NEXUS_REPO_USER is missing"
-            exit 1
-          }
+              set +e
+              CGO_ENABLED=0 go test -v -coverprofile=/reports/coverage.out ./... > /reports/test.log 2>&1
+              rc=$?
+              set -e
 
-          test -n "$NEXUS_REPO_PASS" || {
-            echo "NEXUS_REPO_PASS is missing"
-            exit 1
-          }
+              "$(go env GOPATH)/bin/go-junit-report" < /reports/test.log > /reports/junit.xml
 
-          if [[ "$NEXUS_HOST" == http://* || "$NEXUS_HOST" == https://* || "$NEXUS_HOST" == */* ]]; then
-            echo "NEXUS_HOST must contain only host:port"
-            exit 1
-          fi
+              if [ -f /reports/coverage.out ]; then
+                go tool cover -func=/reports/coverage.out > /reports/coverage.txt
+              fi
 
-      - name: Configure Docker daemon for HTTP Nexus
-        env:
-          NEXUS_HOST: ${{ secrets.NEXUS_HOST }}
-        run: |
-          sudo install -d /etc/docker
+              exit $rc
+            '
 
-          sudo python3 - "$NEXUS_HOST" <<'PY'
-          import json
-          import os
-          import sys
+      - name: Upload test reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: backend-test-reports
+          path: reports/
+          if-no-files-found: warn
 
-          path = "/etc/docker/daemon.json"
-          nexus_host = sys.argv[1]
+  build:
+    name: Build and publish ${{ matrix.component }}
+    needs:
+      - version
+      - test
 
-          if os.path.exists(path):
-              with open(path) as f:
-                  config = json.load(f)
-          else:
-              config = {}
+    runs-on: ubuntu-latest
 
-          registries = set(config.get("insecure-registries", []))
-          registries.add(nexus_host)
-          config["insecure-registries"] = sorted(registries)
+    concurrency:
+      group: build-${{ github.ref }}-${{ matrix.component }}
+      cancel-in-progress: true
 
-          temp_path = path + ".tmp"
-          with open(temp_path, "w") as f:
-              json.dump(config, f, indent=2)
+    strategy:
+      fail-fast: false
+      matrix:
+        component:
+          - backend
+          - frontend
 
-          os.replace(temp_path, path)
-          PY
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
 
-          sudo systemctl restart docker
-          docker info
+      # Nexus configuration is disabled.
+      #
+      # - name: Validate Nexus configuration
+      #   env:
+      #     NEXUS_HOST: ${{ secrets.NEXUS_HOST }}
+      #     NEXUS_REPO_USER: ${{ secrets.NEXUS_REPO_USER }}
+      #     NEXUS_REPO_PASS: ${{ secrets.NEXUS_REPO_PASS }}
+      #   run: |
+      #     set -e
+      #     test -n "$NEXUS_HOST"
+      #     test -n "$NEXUS_REPO_USER"
+      #     test -n "$NEXUS_REPO_PASS"
 
-      - name: Create BuildKit config
-        env:
-          NEXUS_HOST: ${{ secrets.NEXUS_HOST }}
-        run: |
-          cat > buildkitd.toml <<EOF
-          [registry."${NEXUS_HOST}"]
-            http = true
-            insecure = true
-          EOF
+      # HTTP Nexus configuration is disabled.
+      #
+      # - name: Configure Docker daemon for HTTP Nexus
+      #   env:
+      #     NEXUS_HOST: ${{ secrets.NEXUS_HOST }}
+      #   run: |
+      #     sudo install -d /etc/docker
+      #     sudo python3 - "$NEXUS_HOST" <<'PY'
+      #     import json
+      #     import os
+      #     import sys
+      #
+      #     path = "/etc/docker/daemon.json"
+      #     nexus_host = sys.argv[1]
+      #
+      #     if os.path.exists(path):
+      #         with open(path) as f:
+      #             config = json.load(f)
+      #     else:
+      #         config = {}
+      #
+      #     registries = set(config.get("insecure-registries", []))
+      #     registries.add(nexus_host)
+      #     config["insecure-registries"] = sorted(registries)
+      #
+      #     with open(path, "w") as f:
+      #         json.dump(config, f, indent=2)
+      #     PY
+      #
+      #     sudo systemctl restart docker
 
-          cat buildkitd.toml
-
-      - name: Create BuildKit config
-        env:
-          NEXUS_HOST: ${{ secrets.NEXUS_HOST }}
-        run: |
-          cat > buildkitd.toml <<EOF
-          [registry."${NEXUS_HOST}"]
-            http = true
-            insecure = true
-          EOF
+      # BuildKit Nexus configuration is disabled.
+      #
+      # - name: Create BuildKit config
+      #   env:
+      #     NEXUS_HOST: ${{ secrets.NEXUS_HOST }}
+      #   run: |
+      #     cat > buildkitd.toml <<EOF
+      #     [registry."${NEXUS_HOST}"]
+      #       http = true
+      #       insecure = true
+      #     EOF
 
       - name: Setup Docker Buildx
-        id: buildx
         uses: docker/setup-buildx-action@v3
-        with:
-          driver: docker-container
-          config: ./buildkitd.toml
 
-      - name: Login to GHCR
+      - name: Login to GitHub Container Registry
         uses: docker/login-action@v3
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Login to Nexus
-        uses: docker/login-action@v3
-        with:
-          registry: ${{ secrets.NEXUS_HOST }}
-          username: ${{ secrets.NEXUS_REPO_USER }}
-          password: ${{ secrets.NEXUS_REPO_PASS }}
+      # Nexus login is disabled.
+      #
+      # - name: Login to Nexus
+      #   uses: docker/login-action@v3
+      #   with:
+      #     registry: ${{ secrets.NEXUS_HOST }}
+      #     username: ${{ secrets.NEXUS_REPO_USER }}
+      #     password: ${{ secrets.NEXUS_REPO_PASS }}
 
       - name: Docker metadata
         id: meta
@@ -147,7 +196,6 @@ jobs:
         with:
           images: |
             ghcr.io/${{ github.repository_owner }}/sandbox-${{ matrix.component }}
-            ${{ secrets.NEXUS_HOST }}/timerbulatov-${{ matrix.component }}-docker/sandbox-${{ matrix.component }}
           tags: |
             type=raw,value=${{ needs.version.outputs.version }}
             type=sha,prefix=sha-,format=short
@@ -155,10 +203,14 @@ jobs:
           flavor: |
             latest=false
 
+      # Nexus image destination is disabled.
+      #
+      # Previous Nexus image:
+      # ${{ secrets.NEXUS_HOST }}/timerbulatov-${{ matrix.component }}-docker/sandbox-${{ matrix.component }}
+
       - name: Build and push ${{ matrix.component }}
         uses: docker/build-push-action@v6
         with:
-          builder: ${{ steps.buildx.outputs.name }}
           context: ./${{ matrix.component }}
           file: ./${{ matrix.component }}/Dockerfile
           push: true
@@ -169,224 +221,85 @@ jobs:
           cache-from: type=gha,scope=${{ matrix.component }}
           cache-to: type=gha,mode=max,scope=${{ matrix.component }}
 
-  deploy:
-    name: Deploy application
-    needs:
-      - version
-      - test
-      - build
+# --------------------------------------------------
+# VM DEPLOYMENT DISABLED
+# Deployment will be performed separately using Helm.
+# --------------------------------------------------
 
-    if: >-
-      always() &&
-      github.ref == 'refs/heads/main' &&
-      needs.version.result == 'success' &&
-      (
-        (
-          github.event_name == 'push' &&
-          needs.test.result == 'success' &&
-          needs.build.result == 'success'
-        ) ||
-        (
-          github.event_name == 'workflow_dispatch' &&
-          needs.test.result == 'skipped' &&
-          needs.build.result == 'skipped'
-        )
-      )
-
-    runs-on: ubuntu-latest
-    environment: production
-
-    concurrency:
-      group: deploy-production
-      cancel-in-progress: false
-
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Validate deployment secrets
-        env:
-          VM_HOST: ${{ secrets.VM_HOST }}
-          VM_USER: ${{ secrets.VM_USER }}
-          VM_SSH_KEY: ${{ secrets.VM_SSH_KEY }}
-          VM_SSH_KNOWN_HOSTS: ${{ secrets.VM_SSH_KNOWN_HOSTS }}
-          DEPLOY_PATH: ${{ secrets.DEPLOY_PATH }}
-          NEXUS_HOST: ${{ secrets.NEXUS_HOST }}
-          NEXUS_REPO_USER: ${{ secrets.NEXUS_REPO_USER }}
-          NEXUS_REPO_PASS: ${{ secrets.NEXUS_REPO_PASS }}
-        run: |
-          set -e
-
-          for name in VM_HOST VM_USER VM_SSH_KEY VM_SSH_KNOWN_HOSTS DEPLOY_PATH NEXUS_HOST NEXUS_REPO_USER NEXUS_REPO_PASS; do
-            if [ -z "${!name}" ]; then
-              echo "Missing secret: $name"
-              exit 1
-            fi
-          done
-
-          if [[ "$DEPLOY_PATH" != /* ]]; then
-            echo "DEPLOY_PATH must be an absolute path"
-            exit 1
-          fi
-
-      - name: Setup SSH
-        uses: webfactory/ssh-agent@v0.9.0
-        with:
-          ssh-private-key: ${{ secrets.VM_SSH_KEY }}
-
-      - name: Configure known hosts
-        env:
-          SSH_KNOWN_HOSTS: ${{ secrets.VM_SSH_KNOWN_HOSTS }}
-          VM_HOST: ${{ secrets.VM_HOST }}
-        run: |
-          set -e
-
-          mkdir -p ~/.ssh
-          chmod 700 ~/.ssh
-
-          printf '%s\n' "$SSH_KNOWN_HOSTS" > ~/.ssh/known_hosts
-          chmod 600 ~/.ssh/known_hosts
-
-          if ! ssh-keygen -F "$VM_HOST" -f ~/.ssh/known_hosts >/dev/null; then
-            echo "VM_HOST is not present in VM_SSH_KNOWN_HOSTS"
-            exit 1
-          fi
-
-      - name: Test SSH connection
-        env:
-          VM_HOST: ${{ secrets.VM_HOST }}
-          VM_USER: ${{ secrets.VM_USER }}
-        run: |
-          ssh \
-            -o BatchMode=yes \
-            -o StrictHostKeyChecking=yes \
-            "$VM_USER@$VM_HOST" \
-            "echo SSH connection successful"
-
-      - name: Prepare deployment files
-        env:
-          NEXUS_HOST: ${{ secrets.NEXUS_HOST }}
-          VERSION: ${{ needs.version.outputs.version }}
-          APP_ENV_FILE: ${{ secrets.APP_ENV_FILE }}
-        run: |
-          set -e
-
-          mkdir -p deploy/backend
-
-          cat > deploy/.env <<EOF
-          NEXUS_HOST=${NEXUS_HOST}
-          REPOSITORY_BACKEND=${NEXUS_HOST}/timerbulatov-backend-docker/sandbox-backend
-          REPOSITORY_FRONTEND=${NEXUS_HOST}/timerbulatov-frontend-docker/sandbox-frontend
-          VERSION=${VERSION}
-          APP_PORT=8080
-          EOF
-
-          printf '%s' "$APP_ENV_FILE" > deploy/backend/.env
-
-          echo "Deployment version: $VERSION"
-
-      - name: Copy deployment files
-        env:
-          VM_HOST: ${{ secrets.VM_HOST }}
-          VM_USER: ${{ secrets.VM_USER }}
-          DEPLOY_PATH: ${{ secrets.DEPLOY_PATH }}
-        run: |
-          set -e
-
-          ssh "$VM_USER@$VM_HOST" \
-            "mkdir -p '$DEPLOY_PATH/backend'"
-
-          scp docker-compose.deploy.yml \
-            "$VM_USER@$VM_HOST:$DEPLOY_PATH/docker-compose.yml"
-
-          scp deploy/.env \
-            "$VM_USER@$VM_HOST:$DEPLOY_PATH/.env"
-
-          scp deploy/backend/.env \
-            "$VM_USER@$VM_HOST:$DEPLOY_PATH/backend/.env"
-
-      
-      - name: Configure HTTP Nexus on VM
-        env:
-          VM_HOST: ${{ secrets.VM_HOST }}
-          VM_USER: ${{ secrets.VM_USER }}
-          NEXUS_HOST: ${{ secrets.NEXUS_HOST }}
-        run: |
-          set -e
-
-          ssh "$VM_USER@$VM_HOST" \
-            "sudo mkdir -p /etc/docker"
-
-          ssh "$VM_USER@$VM_HOST" \
-            "sudo python3 - '$NEXUS_HOST' <<'PY'
-          import json
-          import os
-          import sys
-
-          path = '/etc/docker/daemon.json'
-          nexus_host = sys.argv[1]
-
-          if os.path.exists(path):
-              with open(path, 'r') as f:
-                  config = json.load(f)
-          else:
-              config = {}
-
-          registries = set(config.get('insecure-registries', []))
-          registries.add(nexus_host)
-
-          config['insecure-registries'] = sorted(registries)
-
-          temp_path = path + '.tmp'
-
-          with open(temp_path, 'w') as f:
-              json.dump(config, f, indent=2)
-
-          os.replace(temp_path, path)
-          PY
-          sudo systemctl restart docker"
-
-          ssh "$VM_USER@$VM_HOST" \
-            "sudo docker info"
-
-
-      - name: Login to Nexus on VM
-        env:
-          VM_HOST: ${{ secrets.VM_HOST }}
-          VM_USER: ${{ secrets.VM_USER }}
-          NEXUS_HOST: ${{ secrets.NEXUS_HOST }}
-          NEXUS_REPO_USER: ${{ secrets.NEXUS_REPO_USER }}
-          NEXUS_REPO_PASS: ${{ secrets.NEXUS_REPO_PASS }}
-        run: |
-          set -e
-
-          PASS_B64=$(printf '%s' "$NEXUS_REPO_PASS" | base64 -w 0)
-          USER_B64=$(printf '%s' "$NEXUS_REPO_USER" | base64 -w 0)
-
-          ssh "$VM_USER@$VM_HOST" \
-            "printf '%s' '$PASS_B64' | base64 -d | docker login '$NEXUS_HOST' \
-            --username \"\$(printf '%s' '$USER_B64' | base64 -d)\" \
-            --password-stdin"
-
-      - name: Deploy with Docker Compose
-        env:
-          VM_HOST: ${{ secrets.VM_HOST }}
-          VM_USER: ${{ secrets.VM_USER }}
-          DEPLOY_PATH: ${{ secrets.DEPLOY_PATH }}
-        run: |
-          set -e
-
-          ssh "$VM_USER@$VM_HOST" \
-            "cd '$DEPLOY_PATH' && \
-            docker compose pull && \
-            docker compose up -d --remove-orphans && \
-            docker image prune -f"
-
-      - name: Verify deployment
-        env:
-          VM_HOST: ${{ secrets.VM_HOST }}
-          VM_USER: ${{ secrets.VM_USER }}
-          DEPLOY_PATH: ${{ secrets.DEPLOY_PATH }}
-        run: |
-          ssh "$VM_USER@$VM_HOST" \
-            "cd '$DEPLOY_PATH' && docker compose ps"
+# deploy:
+#   name: Deploy application to VM
+#   needs:
+#     - version
+#     - test
+#     - build
+#
+#   if: >-
+#     always() &&
+#     github.ref == 'refs/heads/main' &&
+#     needs.version.result == 'success' &&
+#     needs.test.result == 'success' &&
+#     needs.build.result == 'success'
+#
+#   runs-on: ubuntu-latest
+#
+#   steps:
+#     - name: Checkout
+#       uses: actions/checkout@v4
+#
+#     - name: Validate deployment secrets
+#       env:
+#         VM_HOST: ${{ secrets.VM_HOST }}
+#         VM_USER: ${{ secrets.VM_USER }}
+#         VM_SSH_KEY: ${{ secrets.VM_SSH_KEY }}
+#         VM_SSH_KNOWN_HOSTS: ${{ secrets.VM_SSH_KNOWN_HOSTS }}
+#         DEPLOY_PATH: ${{ secrets.DEPLOY_PATH }}
+#         NEXUS_HOST: ${{ secrets.NEXUS_HOST }}
+#       run: |
+#         set -e
+#
+#     - name: Setup SSH
+#       uses: webfactory/ssh-agent@v0.9.0
+#       with:
+#         ssh-private-key: ${{ secrets.VM_SSH_KEY }}
+#
+#     - name: Configure known hosts
+#       env:
+#         SSH_KNOWN_HOSTS: ${{ secrets.VM_SSH_KNOWN_HOSTS }}
+#       run: |
+#         mkdir -p ~/.ssh
+#         chmod 700 ~/.ssh
+#         printf '%s\n' "$SSH_KNOWN_HOSTS" > ~/.ssh/known_hosts
+#         chmod 600 ~/.ssh/known_hosts
+#
+#     - name: Test SSH connection
+#       env:
+#         VM_HOST: ${{ secrets.VM_HOST }}
+#         VM_USER: ${{ secrets.VM_USER }}
+#       run: |
+#         ssh -o StrictHostKeyChecking=yes \
+#           "$VM_USER@$VM_HOST" \
+#           "echo SSH connection successful"
+#
+#     - name: Prepare deployment files
+#       run: |
+#         mkdir -p deploy/backend
+#
+#     - name: Copy deployment files
+#       run: |
+#         echo "VM deployment disabled"
+#
+#     - name: Configure HTTP Nexus on VM
+#       run: |
+#         echo "Nexus configuration disabled"
+#
+#     - name: Login to Nexus on VM
+#       run: |
+#         echo "Nexus login disabled"
+#
+#     - name: Deploy with Docker Compose
+#       run: |
+#         echo "Docker Compose deployment disabled"
+#
+#     - name: Verify deployment
+#       run: |
+#         echo "VM deployment disabled"
