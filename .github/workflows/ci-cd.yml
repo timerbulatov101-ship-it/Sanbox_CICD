@@ -111,9 +111,10 @@ jobs:
           - backend
           - frontend
 
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
+          test -n "$NEXUS_REPO_USER" || {
+            echo "NEXUS_REPO_USER is missing"
+            exit 1
+          }
 
       # Nexus configuration is disabled.
       #
@@ -170,6 +171,16 @@ jobs:
       #       http = true
       #       insecure = true
       #     EOF
+
+      - name: Create BuildKit config
+        env:
+          NEXUS_HOST: ${{ secrets.NEXUS_HOST }}
+        run: |
+          cat > buildkitd.toml <<EOF
+          [registry."${NEXUS_HOST}"]
+            http = true
+            insecure = true
+          EOF
 
       - name: Setup Docker Buildx
         uses: docker/setup-buildx-action@v3
