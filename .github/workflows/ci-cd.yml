@@ -170,7 +170,6 @@ jobs:
           PY
 
           sudo systemctl restart docker
-          docker info
 
       - name: Create BuildKit config
         env:
@@ -250,8 +249,8 @@ jobs:
         ) ||
         (
           github.event_name == 'workflow_dispatch' &&
-          needs.build.result == 'skipped' &&
-          needs.test.result == 'skipped'
+          needs.test.result == 'skipped' &&
+          needs.build.result == 'skipped'
         )
       )
 
@@ -274,10 +273,12 @@ jobs:
           VM_SSH_KNOWN_HOSTS: ${{ secrets.VM_SSH_KNOWN_HOSTS }}
           DEPLOY_PATH: ${{ secrets.DEPLOY_PATH }}
           NEXUS_HOST: ${{ secrets.NEXUS_HOST }}
+          NEXUS_REPO_USER: ${{ secrets.NEXUS_REPO_USER }}
+          NEXUS_REPO_PASS: ${{ secrets.NEXUS_REPO_PASS }}
         run: |
           set -e
 
-          for name in VM_HOST VM_USER VM_SSH_KEY VM_SSH_KNOWN_HOSTS DEPLOY_PATH NEXUS_HOST; do
+          for name in VM_HOST VM_USER VM_SSH_KEY VM_SSH_KNOWN_HOSTS DEPLOY_PATH NEXUS_HOST NEXUS_REPO_USER NEXUS_REPO_PASS; do
             if [ -z "${!name}" ]; then
               echo "Missing secret: $name"
               exit 1
@@ -343,8 +344,6 @@ jobs:
 
           printf '%s' "$APP_ENV_FILE" > deploy/backend/.env
 
-          echo "Deployment version: $VERSION"
-
       - name: Copy deployment files
         env:
           VM_HOST: ${{ secrets.VM_HOST }}
@@ -371,31 +370,8 @@ jobs:
           VM_USER: ${{ secrets.VM_USER }}
           NEXUS_HOST: ${{ secrets.NEXUS_HOST }}
         run: |
-          set -e
-
           ssh "$VM_USER@$VM_HOST" \
-            "sudo python3 - '$NEXUS_HOST' <<'PY'
-          import json
-          import os
-          import sys
-
-          path = '/etc/docker/daemon.json'
-          host = sys.argv[1]
-
-          if os.path.exists(path):
-              with open(path) as f:
-                  config = json.load(f)
-          else:
-              config = {}
-
-          registries = set(config.get('insecure-registries', []))
-          registries.add(host)
-          config['insecure-registries'] = sorted(registries)
-
-          with open(path, 'w') as f:
-              json.dump(config, f, indent=2)
-          PY
-          sudo systemctl restart docker"
+            "sudo python3 -c 'import json,os,sys; p=\"/etc/docker/daemon.json\"; d=json.load(open(p)) if os.path.exists(p) else {}; a=set(d.get(\"insecure-registries\", [])); a.add(sys.argv[1]); d[\"insecure-registries\"]=sorted(a); json.dump(d,open(p,\"w\"))' '$NEXUS_HOST' && sudo systemctl restart docker"
 
       - name: Login to Nexus on VM
         env:
