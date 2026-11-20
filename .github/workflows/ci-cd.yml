@@ -113,18 +113,30 @@ jobs:
       - name: Validate Nexus configuration
         env:
           NEXUS_HOST: ${{ secrets.NEXUS_HOST }}
+          NEXUS_REPO_USER: ${{ secrets.NEXUS_REPO_USER }}
+          NEXUS_REPO_PASS: ${{ secrets.NEXUS_REPO_PASS }}
         run: |
-          if [ -z "$NEXUS_HOST" ]; then
-            echo "NEXUS_HOST secret is empty"
+          set -e
+
+          test -n "$NEXUS_HOST" || {
+            echo "NEXUS_HOST is missing"
             exit 1
-          fi
+          }
+
+          test -n "$NEXUS_REPO_USER" || {
+            echo "NEXUS_REPO_USER is missing"
+            exit 1
+          }
+
+          test -n "$NEXUS_REPO_PASS" || {
+            echo "NEXUS_REPO_PASS is missing"
+            exit 1
+          }
 
           if [[ "$NEXUS_HOST" == http://* || "$NEXUS_HOST" == https://* || "$NEXUS_HOST" == */* ]]; then
             echo "NEXUS_HOST must contain only host:port"
             exit 1
           fi
-
-          echo "Nexus host: $NEXUS_HOST"
 
       - name: Configure Docker daemon for HTTP Nexus
         env:
@@ -169,8 +181,6 @@ jobs:
             http = true
             insecure = true
           EOF
-
-          cat buildkitd.toml
 
       - name: Setup Docker Buildx
         id: buildx
@@ -227,6 +237,7 @@ jobs:
       - version
       - test
       - build
+
     if: >-
       always() &&
       github.ref == 'refs/heads/main' &&
@@ -237,8 +248,13 @@ jobs:
           needs.test.result == 'success' &&
           needs.build.result == 'success'
         ) ||
-        github.event_name == 'workflow_dispatch'
+        (
+          github.event_name == 'workflow_dispatch' &&
+          needs.build.result == 'skipped' &&
+          needs.test.result == 'skipped'
+        )
       )
+
     runs-on: ubuntu-latest
     environment: production
 
@@ -250,6 +266,29 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
+      - name: Validate deployment secrets
+        env:
+          VM_HOST: ${{ secrets.VM_HOST }}
+          VM_USER: ${{ secrets.VM_USER }}
+          VM_SSH_KEY: ${{ secrets.VM_SSH_KEY }}
+          VM_SSH_KNOWN_HOSTS: ${{ secrets.VM_SSH_KNOWN_HOSTS }}
+          DEPLOY_PATH: ${{ secrets.DEPLOY_PATH }}
+          NEXUS_HOST: ${{ secrets.NEXUS_HOST }}
+        run: |
+          set -e
+
+          for name in VM_HOST VM_USER VM_SSH_KEY VM_SSH_KNOWN_HOSTS DEPLOY_PATH NEXUS_HOST; do
+            if [ -z "${!name}" ]; then
+              echo "Missing secret: $name"
+              exit 1
+            fi
+          done
+
+          if [[ "$DEPLOY_PATH" != /* ]]; then
+            echo "DEPLOY_PATH must be an absolute path"
+            exit 1
+          fi
+
       - name: Setup SSH
         uses: webfactory/ssh-agent@v0.9.0
         with:
@@ -258,11 +297,31 @@ jobs:
       - name: Configure known hosts
         env:
           SSH_KNOWN_HOSTS: ${{ secrets.VM_SSH_KNOWN_HOSTS }}
+          VM_HOST: ${{ secrets.VM_HOST }}
         run: |
+          set -e
+
           mkdir -p ~/.ssh
           chmod 700 ~/.ssh
+
           printf '%s\n' "$SSH_KNOWN_HOSTS" > ~/.ssh/known_hosts
           chmod 600 ~/.ssh/known_hosts
+
+          if ! ssh-keygen -F "$VM_HOST" -f ~/.ssh/known_hosts >/dev/null; then
+            echo "VM_HOST is not present in VM_SSH_KNOWN_HOSTS"
+            exit 1
+          fi
+
+      - name: Test SSH connection
+        env:
+          VM_HOST: ${{ secrets.VM_HOST }}
+          VM_USER: ${{ secrets.VM_USER }}
+        run: |
+          ssh \
+            -o BatchMode=yes \
+            -o StrictHostKeyChecking=yes \
+            "$VM_USER@$VM_HOST" \
+            "echo SSH connection successful"
 
       - name: Prepare deployment files
         env:
@@ -270,6 +329,8 @@ jobs:
           VERSION: ${{ needs.version.outputs.version }}
           APP_ENV_FILE: ${{ secrets.APP_ENV_FILE }}
         run: |
+          set -e
+
           mkdir -p deploy/backend
 
           cat > deploy/.env <<EOF
@@ -290,7 +351,10 @@ jobs:
           VM_USER: ${{ secrets.VM_USER }}
           DEPLOY_PATH: ${{ secrets.DEPLOY_PATH }}
         run: |
-          ssh "$VM_USER@$VM_HOST" "mkdir -p '$DEPLOY_PATH/backend'"
+          set -e
+
+          ssh "$VM_USER@$VM_HOST" \
+            "mkdir -p '$DEPLOY_PATH/backend'"
 
           scp docker-compose.deploy.yml \
             "$VM_USER@$VM_HOST:$DEPLOY_PATH/docker-compose.yml"
@@ -307,8 +371,31 @@ jobs:
           VM_USER: ${{ secrets.VM_USER }}
           NEXUS_HOST: ${{ secrets.NEXUS_HOST }}
         run: |
+          set -e
+
           ssh "$VM_USER@$VM_HOST" \
-            "sudo python3 -c 'import json,os,sys; p=\"/etc/docker/daemon.json\"; d=json.load(open(p)) if os.path.exists(p) else {}; a=set(d.get(\"insecure-registries\", [])); a.add(sys.argv[1]); d[\"insecure-registries\"]=sorted(a); json.dump(d,open(p,\"w\"))' '$NEXUS_HOST' && sudo systemctl restart docker"
+            "sudo python3 - '$NEXUS_HOST' <<'PY'
+          import json
+          import os
+          import sys
+
+          path = '/etc/docker/daemon.json'
+          host = sys.argv[1]
+
+          if os.path.exists(path):
+              with open(path) as f:
+                  config = json.load(f)
+          else:
+              config = {}
+
+          registries = set(config.get('insecure-registries', []))
+          registries.add(host)
+          config['insecure-registries'] = sorted(registries)
+
+          with open(path, 'w') as f:
+              json.dump(config, f, indent=2)
+          PY
+          sudo systemctl restart docker"
 
       - name: Login to Nexus on VM
         env:
@@ -318,6 +405,8 @@ jobs:
           NEXUS_REPO_USER: ${{ secrets.NEXUS_REPO_USER }}
           NEXUS_REPO_PASS: ${{ secrets.NEXUS_REPO_PASS }}
         run: |
+          set -e
+
           PASS_B64=$(printf '%s' "$NEXUS_REPO_PASS" | base64 -w 0)
           USER_B64=$(printf '%s' "$NEXUS_REPO_USER" | base64 -w 0)
 
@@ -332,8 +421,19 @@ jobs:
           VM_USER: ${{ secrets.VM_USER }}
           DEPLOY_PATH: ${{ secrets.DEPLOY_PATH }}
         run: |
+          set -e
+
           ssh "$VM_USER@$VM_HOST" \
             "cd '$DEPLOY_PATH' && \
             docker compose pull && \
             docker compose up -d --remove-orphans && \
             docker image prune -f"
+
+      - name: Verify deployment
+        env:
+          VM_HOST: ${{ secrets.VM_HOST }}
+          VM_USER: ${{ secrets.VM_USER }}
+          DEPLOY_PATH: ${{ secrets.DEPLOY_PATH }}
+        run: |
+          ssh "$VM_USER@$VM_HOST" \
+            "cd '$DEPLOY_PATH' && docker compose ps"
