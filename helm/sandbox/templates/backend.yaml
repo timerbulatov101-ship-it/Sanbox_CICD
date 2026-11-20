@@ -1,0 +1,32 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ .Values.backend.name }}
+spec:
+  replicas: {{ .Values.backend.replicas }}
+  selector:
+    matchLabels:
+      app: {{ .Values.backend.name }}
+  template:
+    metadata:
+      labels:
+        app: {{ .Values.backend.name }}
+    spec:
+      containers:
+        - name: backend
+          image: "{{ .Values.image.registry }}/sandbox-backend:{{ .Values.image.tag }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          ports:
+            - containerPort: {{ .Values.backend.port }}
+          resources:
+            {{- toYaml .Values.backend.resources | nindent 12 }}
+          readinessProbe:
+            tcpSocket:
+              port: {{ .Values.backend.port }}
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          livenessProbe:
+            tcpSocket:
+              port: {{ .Values.backend.port }}
+            initialDelaySeconds: 15
+            periodSeconds: 20

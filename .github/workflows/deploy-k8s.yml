@@ -1,0 +1,125 @@
+name: Deploy to Kubernetes
+
+on:
+  workflow_dispatch:
+    inputs:
+      VERSION:
+        description: "Версия образов (например, 20261119-214623)"
+        required: true
+        type: string
+
+permissions:
+  contents: read
+  packages: read
+
+concurrency:
+  group: deploy-kubernetes
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    name: Deploy with Helm
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Validate version
+        env:
+          VERSION: ${{ inputs.VERSION }}
+        run: |
+          if [[ ! "$VERSION" =~ ^[A-Za-z0-9_][A-Za-z0-9_.-]{0,127}$ ]]; then
+            echo "Invalid Docker image tag: $VERSION"
+            exit 1
+          fi
+
+          echo "Deploying version: $VERSION"
+
+      - name: Login to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Check Docker images
+        env:
+          VERSION: ${{ inputs.VERSION }}
+        run: |
+          docker manifest inspect \
+            "ghcr.io/timerbulatov101-ship-it/sandbox-backend:$VERSION"
+
+          docker manifest inspect \
+            "ghcr.io/timerbulatov101-ship-it/sandbox-frontend:$VERSION"
+
+      - name: Install Yandex Cloud CLI
+        run: |
+          curl -sSL https://storage.yandexcloud.net/yandexcloud-yc/install.sh | bash
+          echo "$HOME/yandex-cloud/bin" >> "$GITHUB_PATH"
+
+      - name: Configure Yandex Cloud
+        env:
+          YC_SERVICE_ACCOUNT_KEY_JSON: ${{ secrets.YC_SERVICE_ACCOUNT_KEY_JSON }}
+          YC_CLOUD_ID: ${{ secrets.YC_CLOUD_ID }}
+          YC_FOLDER_ID: ${{ secrets.YC_FOLDER_ID }}
+        run: |
+          printf '%s' "$YC_SERVICE_ACCOUNT_KEY_JSON" \
+            > "$RUNNER_TEMP/yc-key.json"
+
+          yc config profile create github-actions
+
+          yc config set service-account-key "$RUNNER_TEMP/yc-key.json"
+          yc config set cloud-id "$YC_CLOUD_ID"
+          yc config set folder-id "$YC_FOLDER_ID"
+
+          yc iam create-token > /dev/null
+
+      - name: Install kubectl
+        uses: azure/setup-kubectl@v4
+        with:
+          version: v1.35.1
+
+      - name: Install Helm
+        uses: azure/setup-helm@v4
+        with:
+          version: v3.17.3
+
+      - name: Configure Kubernetes access
+        env:
+          YC_CLUSTER_ID: ${{ secrets.YC_CLUSTER_ID }}
+        run: |
+          yc managed-kubernetes cluster get-credentials \
+            "$YC_CLUSTER_ID" \
+            --external \
+            --force \
+            --kubeconfig "$RUNNER_TEMP/kubeconfig"
+
+          echo "KUBECONFIG=$RUNNER_TEMP/kubeconfig" >> "$GITHUB_ENV"
+
+          kubectl get nodes
+
+      - name: Deploy application
+        env:
+          VERSION: ${{ inputs.VERSION }}
+        run: |
+          helm upgrade --install sandbox ./helm/sandbox \
+            --namespace default \
+            --set-string image.tag="$VERSION" \
+            --wait \
+            --timeout 5m
+
+      - name: Verify deployment
+        run: |
+          kubectl rollout status deployment/sandbox-backend \
+            -n default --timeout=180s
+
+          kubectl rollout status deployment/sandbox-frontend \
+            -n default --timeout=180s
+
+          echo "Deployment completed successfully"
+
+          kubectl get pods -n default
+          kubectl get services -n default
+
+          helm status sandbox -n default

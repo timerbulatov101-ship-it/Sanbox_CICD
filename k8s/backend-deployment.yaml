@@ -1,0 +1,29 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: sandbox-backend
+  labels:
+    app: sandbox-backend
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: sandbox-backend
+  template:
+    metadata:
+      labels:
+        app: sandbox-backend
+    spec:
+      containers:
+        - name: sandbox-backend
+          image: ghcr.io/timerbulatov101-ship-it/sandbox-backend:latest
+          imagePullPolicy: Always
+          ports:
+            - containerPort: 8081
+          resources:
+            requests:
+              cpu: 100m
+              memory: 128Mi
+            limits:
+              cpu: 500m
+              memory: 512Mi
