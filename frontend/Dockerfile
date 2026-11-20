@@ -1,7 +1,8 @@
+
 FROM node:16.20.0-alpine3.18 AS builder
 
 ARG VERSION="0.0.1"
-ARG VUE_APP_API_URL="http://localhost:8081"
+ARG VUE_APP_API_URL="/"
 
 WORKDIR /app
 
@@ -15,16 +16,13 @@ ENV VUE_APP_API_URL=${VUE_APP_API_URL}
 
 RUN npm run build -- --dest "/app/build/frontend-${VERSION}/site"
 
-FROM node:16.20.0-alpine3.18 AS runtime
+FROM nginx:1.27-alpine AS runtime
 
 ARG VERSION="0.0.1"
 
-WORKDIR /app
-
-RUN npm install -g http-server
-
-COPY --from=builder /app/build/frontend-${VERSION}/site ./site
+COPY --from=builder /app/build/frontend-${VERSION}/site /usr/share/nginx/html
+COPY default.conf /etc/nginx/conf.d/default.conf
 
 EXPOSE 8080
 
-CMD ["http-server", "./site", "-p", "8080", "-a", "0.0.0.0", "-c-1"]
+CMD ["nginx", "-g", "daemon off;"]
