@@ -34,6 +34,11 @@ jobs:
             VERSION=$(date -u +%Y%m%d-%H%M%S)
           fi
 
+          if [[ ! "$VERSION" =~ ^[A-Za-z0-9_][A-Za-z0-9_.-]{0,127}$ ]]; then
+            echo "Invalid version: $VERSION"
+            exit 1
+          fi
+
           echo "version=$VERSION" >> "$GITHUB_OUTPUT"
           echo "Using version: $VERSION"
 
@@ -91,7 +96,7 @@ jobs:
     runs-on: ubuntu-latest
 
     concurrency:
-      group: build-${{ github.ref }}
+      group: build-${{ github.ref }}-${{ matrix.component }}
       cancel-in-progress: true
 
     strategy:
@@ -105,15 +110,60 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Create BuildKit config
+      - name: Validate Nexus configuration
         env:
           NEXUS_HOST: ${{ secrets.NEXUS_HOST }}
         run: |
+          if [ -z "$NEXUS_HOST" ]; then
+            echo "NEXUS_HOST secret is empty"
+            exit 1
+          fi
+
           if [[ "$NEXUS_HOST" == http://* || "$NEXUS_HOST" == https://* || "$NEXUS_HOST" == */* ]]; then
             echo "NEXUS_HOST must contain only host:port"
             exit 1
           fi
 
+          echo "Nexus host: $NEXUS_HOST"
+
+      - name: Configure Docker daemon for HTTP Nexus
+        env:
+          NEXUS_HOST: ${{ secrets.NEXUS_HOST }}
+        run: |
+          sudo install -d /etc/docker
+
+          sudo python3 - "$NEXUS_HOST" <<'PY'
+          import json
+          import os
+          import sys
+
+          path = "/etc/docker/daemon.json"
+          nexus_host = sys.argv[1]
+
+          if os.path.exists(path):
+              with open(path) as f:
+                  config = json.load(f)
+          else:
+              config = {}
+
+          registries = set(config.get("insecure-registries", []))
+          registries.add(nexus_host)
+          config["insecure-registries"] = sorted(registries)
+
+          temp_path = path + ".tmp"
+          with open(temp_path, "w") as f:
+              json.dump(config, f, indent=2)
+
+          os.replace(temp_path, path)
+          PY
+
+          sudo systemctl restart docker
+          docker info
+
+      - name: Create BuildKit config
+        env:
+          NEXUS_HOST: ${{ secrets.NEXUS_HOST }}
+        run: |
           cat > buildkitd.toml <<EOF
           [registry."${NEXUS_HOST}"]
             http = true
@@ -124,20 +174,20 @@ jobs:
 
       - name: Setup Docker Buildx
         id: buildx
-        uses: docker/setup-buildx-action@v4
+        uses: docker/setup-buildx-action@v3
         with:
           driver: docker-container
           config: ./buildkitd.toml
 
       - name: Login to GHCR
-        uses: docker/login-action@v4
+        uses: docker/login-action@v3
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Login to Nexus
-        uses: docker/login-action@v4
+        uses: docker/login-action@v3
         with:
           registry: ${{ secrets.NEXUS_HOST }}
           username: ${{ secrets.NEXUS_REPO_USER }}
@@ -158,7 +208,7 @@ jobs:
             latest=false
 
       - name: Build and push ${{ matrix.component }}
-        uses: docker/build-push-action@v7
+        uses: docker/build-push-action@v6
         with:
           builder: ${{ steps.buildx.outputs.name }}
           context: ./${{ matrix.component }}
@@ -268,8 +318,13 @@ jobs:
           NEXUS_REPO_USER: ${{ secrets.NEXUS_REPO_USER }}
           NEXUS_REPO_PASS: ${{ secrets.NEXUS_REPO_PASS }}
         run: |
-          printf '%s' "$NEXUS_REPO_PASS" | ssh "$VM_USER@$VM_HOST" \
-            "docker login '$NEXUS_HOST' --username '$NEXUS_REPO_USER' --password-stdin"
+          PASS_B64=$(printf '%s' "$NEXUS_REPO_PASS" | base64 -w 0)
+          USER_B64=$(printf '%s' "$NEXUS_REPO_USER" | base64 -w 0)
+
+          ssh "$VM_USER@$VM_HOST" \
+            "printf '%s' '$PASS_B64' | base64 -d | docker login '$NEXUS_HOST' \
+            --username \"\$(printf '%s' '$USER_B64' | base64 -d)\" \
+            --password-stdin"
 
       - name: Deploy with Docker Compose
         env:
