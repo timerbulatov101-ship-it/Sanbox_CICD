@@ -12,12 +12,58 @@ spec:
       labels:
         app: {{ .Values.backend.name }}
     spec:
+      {{ if .Values.database.enabled }}
+      initContainers:
+        - name: wait-for-postgres
+          image: {{ .Values.database.image | quote }}
+          env:
+            - name: POSTGRES_USER
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.database.name }}-auth
+                  key: POSTGRES_USER
+            - name: POSTGRES_DB
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.database.name }}-auth
+                  key: POSTGRES_DB
+          command:
+            - sh
+            - -c
+            - until pg_isready -h {{ .Values.database.name }} -p {{ .Values.database.port }} -U "$POSTGRES_USER" -d "$POSTGRES_DB"; do echo waiting for postgres; sleep 2; done
+      {{ end }}
       containers:
         - name: backend
           image: "{{ .Values.image.registry }}/sandbox-backend:{{ .Values.image.tag }}"
           imagePullPolicy: {{ .Values.image.pullPolicy }}
           ports:
             - containerPort: {{ .Values.backend.port }}
+          env:
+            - name: DB_ENABLED
+              value: {{ .Values.database.enabled | ternary "true" "false" | quote }}
+            {{ if .Values.database.enabled }}
+            - name: DB_HOST
+              value: {{ .Values.database.name | quote }}
+            - name: DB_PORT
+              value: {{ .Values.database.port | quote }}
+            - name: DB_USER
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.database.name }}-auth
+                  key: POSTGRES_USER
+            - name: DB_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.database.name }}-auth
+                  key: POSTGRES_PASSWORD
+            - name: DB_NAME
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.database.name }}-auth
+                  key: POSTGRES_DB
+            - name: DB_SSLMODE
+              value: "disable"
+            {{ end }}
           resources:
             {{- toYaml .Values.backend.resources | nindent 12 }}
           readinessProbe:

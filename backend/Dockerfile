@@ -1,26 +1,29 @@
-ARG VERSION="0.0.1"
+FROM golang:1.23-alpine AS builder
 
-FROM golang:alpine AS builder
+WORKDIR /src
 
-ARG VERSION
-
-WORKDIR /app
+COPY go.mod go.sum ./
+RUN go mod download && go mod verify
 
 COPY . .
 
 RUN CGO_ENABLED=0 GOOS=linux go build \
-    -ldflags="-w -s" \
-    -o "./build/backend-${VERSION}/app" \
-    ./cmd/api/main.go ./cmd/api/router.go
+    -trimpath \
+    -ldflags="-s -w" \
+    -o /out/backend \
+    ./cmd/api
 
-FROM golang:alpine AS runtime
+FROM builder AS test
+RUN go test ./...
 
-ARG VERSION
+FROM gcr.io/distroless/static-debian12:nonroot AS runtime
 
-WORKDIR /app
+ARG VERSION="0.0.1"
 
-COPY --from=builder /app/build/backend-${VERSION}/app ./app
+WORKDIR /
+COPY --from=builder /out/backend /backend
+LABEL org.opencontainers.image.version=${VERSION}
 
 EXPOSE 8081
-
-CMD ["./app"]
+USER nonroot:nonroot
+ENTRYPOINT ["/backend"]

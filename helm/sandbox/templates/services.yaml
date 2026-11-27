@@ -17,12 +17,14 @@ kind: Service
 metadata:
   name: {{ .Values.frontend.name }}
 spec:
-  type: NodePort
+  type: {{ if .Values.ingress.enabled }}ClusterIP{{ else }}NodePort{{ end }}
   selector:
     app: {{ .Values.frontend.name }}
   ports:
     - name: http
       port: {{ .Values.frontend.port }}
       targetPort: {{ .Values.frontend.port }}
+      {{ if not .Values.ingress.enabled }}
       nodePort: {{ .Values.frontend.nodePort }}
+      {{ end }}
       protocol: TCP

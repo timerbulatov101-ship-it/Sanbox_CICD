@@ -1,27 +1,72 @@
 services:
+  postgres:
+    image: postgres:15-alpine
+    container_name: sandbox-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${DB_USER:-postgres}
+      POSTGRES_PASSWORD: ${DB_PASSWORD:-postgres}
+      POSTGRES_DB: ${DB_NAME:-sandbox}
+    ports:
+      - "127.0.0.1:5432:5432"
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    networks:
+      - sandbox-network
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U \"$${POSTGRES_USER}\" -d \"$${POSTGRES_DB}\""]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 10s
+
   backend:
     image: sandbox-backend:latest
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+      target: runtime
     container_name: sandbox-backend
     restart: unless-stopped
     env_file:
+      - ./.env
       - ./backend/.env
+    environment:
+      DB_ENABLED: ${DB_ENABLED:-true}
+      DB_HOST: postgres
+      DB_PORT: "5432"
+      DB_USER: ${DB_USER:-postgres}
+      DB_PASSWORD: ${DB_PASSWORD:-postgres}
+      DB_NAME: ${DB_NAME:-sandbox}
+      DB_SSLMODE: ${DB_SSLMODE:-disable}
     ports:
       - "8081:8081"
+    depends_on:
+      postgres:
+        condition: service_healthy
     networks:
       - sandbox-network
 
   frontend:
     image: sandbox-frontend:latest
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+      target: runtime
     container_name: sandbox-frontend
     restart: unless-stopped
     ports:
       - "${APP_PORT:-8080}:8080"
-    networks:
-      - sandbox-network
     depends_on:
       - backend
+    networks:
+      - sandbox-network
 
 networks:
   sandbox-network:
-    driver: bridge
     name: sandbox-network
+    driver: bridge
+
+volumes:
+  postgres-data:
+    name: sandbox-postgres-data
