@@ -45,44 +45,46 @@ jobs:
           echo "Using version: $VERSION"
 
   test:
-    name: Backend tests
+    name: Backend tests (Dockerfile test stage)
     runs-on: ubuntu-latest
 
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Build backend builder
+      - name: Setup Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Run backend test stage
+        uses: docker/build-push-action@v6
+        with:
+          context: ./backend
+          file: ./backend/Dockerfile
+          target: test
+          push: false
+          outputs: type=local,dest=./reports
+          cache-from: type=gha,scope=backend
+          cache-to: type=gha,mode=max,scope=backend
+
+      - name: Check backend test result
+        if: always()
         run: |
-          docker build \
-            --target builder \
-            -t sandbox-backend-builder:ci \
-            ./backend
+          set -euo pipefail
 
-      - name: Run tests
-        run: |
-          set -e
-          mkdir -p reports
+          if [[ ! -f reports/test.exit-code ]]; then
+            echo "::error::Dockerfile test stage did not produce reports/test.exit-code"
+            exit 1
+          fi
 
-          docker run --rm \
-            -v "$PWD/reports:/reports" \
-            sandbox-backend-builder:ci \
-            sh -c '
-              go install github.com/jstemmer/go-junit-report/v2@v2.1.0
+          cat reports/test.log
+          test_status="$(cat reports/test.exit-code)"
 
-              set +e
-              CGO_ENABLED=0 go test -v -coverprofile=/reports/coverage.out ./... > /reports/test.log 2>&1
-              rc=$?
-              set -e
+          if [[ "$test_status" != "0" ]]; then
+            echo "::error::Backend tests failed with exit code $test_status"
+            exit "$test_status"
+          fi
 
-              "$(go env GOPATH)/bin/go-junit-report" < /reports/test.log > /reports/junit.xml
-
-              if [ -f /reports/coverage.out ]; then
-                go tool cover -func=/reports/coverage.out > /reports/coverage.txt
-              fi
-
-              exit $rc
-            '
+          echo "Backend tests passed"
 
       - name: Upload test reports
         if: always()

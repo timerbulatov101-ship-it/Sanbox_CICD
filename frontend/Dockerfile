@@ -1,10 +1,12 @@
-FROM node:16.20.0-alpine3.18 AS dependencies
+# syntax=docker/dockerfile:1.7
+
+FROM node:16.20.2-alpine3.18@sha256:a1f9d027912b58a7c75be7716c97cfbc6d3099f3a97ed84aa490be9dee20e787 AS dependencies
 
 WORKDIR /app
 COPY package.json package-lock.json ./
 RUN npm ci --legacy-peer-deps
 
-FROM node:16.20.0-alpine3.18 AS builder
+FROM node:16.20.2-alpine3.18@sha256:a1f9d027912b58a7c75be7716c97cfbc6d3099f3a97ed84aa490be9dee20e787 AS builder
 
 ARG VERSION="0.0.1"
 ARG VUE_APP_API_URL="/"
@@ -18,7 +20,7 @@ ENV VUE_APP_API_URL=${VUE_APP_API_URL}
 
 RUN npm run build -- --dest "/app/build/frontend-${VERSION}/site"
 
-FROM nginx:1.27-alpine AS runtime
+FROM nginx:1.27-alpine@sha256:65645c7bb6a0661892a8b03b89d0743208a18dd2f3f17a54ef4b76fb8e2f2a10 AS runtime
 
 ARG VERSION="0.0.1"
 
