@@ -27,3 +27,25 @@ frontend:
     limits:
       cpu: 500m
       memory: 256Mi
+
+database:
+  enabled: true
+  name: sandbox-postgres
+  image: postgres:15-alpine
+  port: 5432
+  user: postgres
+  password: ""
+  database: sandbox
+  storage: 2Gi
+  resources:
+    requests:
+      cpu: 100m
+      memory: 128Mi
+    limits:
+      cpu: 500m
+      memory: 512Mi
+
+ingress:
+  enabled: false
+  className: nginx
+  host: sandbox.your.domain
